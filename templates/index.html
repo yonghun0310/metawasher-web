@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MetaWasher</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+
+    <!-- ============================== -->
+    <!-- 상단 헤더: 로고 및 ExifTool 상태 -->
+    <!-- ============================== -->
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Python + ExifTool</p>
+        <h1>MetaWasher</h1>
+      </div>
+      <!-- ExifTool 설치 여부에 따라 상태 표시 (초록: 사용 가능 / 노란: 필요) -->
+      <div class="engine-status" aria-label="처리 엔진 상태">
+        <span class="status-dot {{ 'ok' if tools.exiftool else 'warn' }}"></span>
+        <span>{{ 'ExifTool 사용 가능' if tools.exiftool else 'ExifTool 필요' }}</span>
+      </div>
+    </header>
+
+    <!-- ============================== -->
+    <!-- 메인 레이아웃: 업로드 패널 + 정보 사이드바 -->
+    <!-- ============================== -->
+    <main class="layout">
+
+      <!-- 파일 업로드 패널 -->
+      <section class="upload-panel" aria-labelledby="upload-title">
+        <div class="section-heading">
+          <p class="eyebrow">Local Cleaning</p>
+          <h2 id="upload-title">사진과 동영상 메타데이터 삭제</h2>
+        </div>
+
+        <!-- Flask flash 메시지 표시 (파일 미선택, 용량 초과 등 알림) -->
+        {% with messages = get_flashed_messages() %}
+          {% if messages %}
+            <div class="notice" role="alert">
+              {% for message in messages %}
+                <p>{{ message }}</p>
+              {% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+
+        <!-- 파일 업로드 폼 (multipart/form-data) -->
+        <form class="upload-form" method="post" action="{{ url_for('clean_uploads') }}" enctype="multipart/form-data">
+          <!-- 드래그 앤 드롭 지원 드롭존 -->
+          <label class="dropzone" for="files" id="dropzone">
+            <input id="files" name="files" type="file" accept="image/*,video/*" multiple required>
+            <span class="drop-icon" aria-hidden="true">+</span>
+            <span class="drop-title">파일 선택 또는 드래그</span>
+            <span class="drop-meta">JPG, PNG, HEIC, MP4, MOV 등 / 최대 {{ max_upload_mb }}MB</span>
+          </label>
+
+          <!-- 선택된 파일 목록 표시 영역 (JavaScript로 동적 업데이트) -->
+          <div class="selected-files" id="selected-files" aria-live="polite">
+            <span>선택된 파일 없음</span>
+          </div>
+
+          <button class="primary-button" type="submit" id="submit-button">
+            메타데이터 삭제
+          </button>
+        </form>
+      </section>
+
+      <!-- 정보 사이드바: 처리 방식, 지원 확장자, 도구 상태 안내 -->
+      <aside class="info-panel" aria-label="처리 정보">
+        <div class="info-row">
+          <span>삭제 대상</span>
+          <strong>GPS, 기종명, 작성자, 소프트웨어, IP 계열 태그</strong>
+        </div>
+        <div class="info-row">
+          <span>처리 방식</span>
+          <strong>원본 보존, 정리된 사본 생성</strong>
+        </div>
+        <div class="info-row">
+          <span>지원 확장자</span>
+          <strong>{{ allowed_extensions }}</strong>
+        </div>
+        <div class="info-row">
+          <span>도구</span>
+          <strong>ExifTool{% if tools.ffmpeg %}, FFmpeg{% endif %}</strong>
+        </div>
+        <div class="info-row">
+          <span>위치 표시</span>
+          <strong>Google Maps{% if not google_maps_api_key %} API 키 필요{% endif %}</strong>
+        </div>
+      </aside>
+    </main>
+
+    <!-- ============================== -->
+    <!-- 처리 결과 섹션 (결과가 있을 때만 표시) -->
+    <!-- ============================== -->
+    {% if results %}
+      <section class="results-wrap" aria-labelledby="results-title">
+        <div class="results-heading">
+          <div>
+            <p class="eyebrow">Results</p>
+            <h2 id="results-title">처리 결과</h2>
+          </div>
+          <!-- ZIP 일괄 다운로드 버튼 (성공한 파일이 있을 때만 표시) -->
+          {% if zip_url %}
+            <a class="secondary-button" href="{{ zip_url }}">전체 ZIP 다운로드</a>
+          {% endif %}
+        </div>
+
+        <!-- 개별 파일 처리 결과 목록 -->
+        <div class="result-list">
+          {% for result in results %}
+            <article class="result-item {{ 'is-error' if result.status == 'error' else '' }}">
+              <!-- 파일명, 크기 변화, 사용 엔진 표시 -->
+              <div class="result-main">
+                <div>
+                  <p class="file-name">{{ result.original_name }}</p>
+                  {% if result.status == 'ok' %}
+                    <p class="file-meta">
+                      {{ result.original_size }} -> {{ result.cleaned_size }} / {{ result.engine }}
+                    </p>
+                  {% else %}
+                    <p class="file-meta">{{ result.message }}</p>
+                  {% endif %}
+                </div>
+
+                {% if result.status == 'ok' %}
+                  <a class="download-button" href="{{ result.download_url }}">다운로드</a>
+                {% else %}
+                  <span class="error-badge">실패</span>
+                {% endif %}
+              </div>
+
+              {% if result.status == 'ok' %}
+
+                <!-- GPS 위치 카드: 촬영 위치가 있을 때 지도/좌표 표시 -->
+                {% if result.gps_location %}
+                  <section
+                    class="location-card"
+                    data-location-card
+                    data-lat="{{ result.gps_location.lat }}"
+                    data-lng="{{ result.gps_location.lng }}"
+                    data-file-name="{{ result.original_name }}"
+                  >
+                    <!-- 좌표/주소 텍스트 정보 -->
+                    <div class="location-copy">
+                      <p class="eyebrow">GPS Location</p>
+                      <h3>촬영 위치</h3>
+                      <p class="location-address" data-location-address>{{ result.gps_location.label }}</p>
+                      <p class="location-coordinates">
+                        위도 {{ result.gps_location.lat }} / 경도 {{ result.gps_location.lng }}
+                        {% if result.gps_location.altitude is defined %}
+                          / 고도 {{ result.gps_location.altitude }}m
+                        {% endif %}
+                      </p>
+                      <a class="map-link" href="{{ result.gps_location.maps_url }}" target="_blank" rel="noopener">
+                        Google Maps에서 열기
+                      </a>
+                    </div>
+
+                    <!-- 지도 렌더링 영역 (API 키 유무에 따라 지도 또는 안내 표시) -->
+                    <div class="map-shell">
+                      {% if google_maps_api_key %}
+                        <div class="map-canvas" data-map-canvas aria-label="촬영 위치 지도"></div>
+                      {% else %}
+                        <div class="map-placeholder">
+                          <strong>지도 표시 대기</strong>
+                          <span>GOOGLE_MAPS_API_KEY를 설정하면 이 위치가 Google Maps 마커로 표시됩니다.</span>
+                        </div>
+                      {% endif %}
+                    </div>
+                  </section>
+                {% endif %}
+
+                <!-- 메타데이터 전/후 비교 그리드 -->
+                <div class="metadata-grid">
+                  <!-- 삭제 전 민감 태그 목록 -->
+                  <div>
+                    <h3>삭제 전</h3>
+                    <p class="tag-count">전체 메타 태그 {{ result.before_count }}개</p>
+                    {% if result.before_sensitive %}
+                      <ul class="tag-list">
+                        {% for item in result.before_sensitive %}
+                          <li><span>{{ item.key }}</span><strong>{{ item.value }}</strong></li>
+                        {% endfor %}
+                      </ul>
+                    {% else %}
+                      <p class="empty-state">민감 태그를 찾지 못했습니다.</p>
+                    {% endif %}
+                  </div>
+
+                  <!-- 삭제 후 잔존 민감 태그 목록 (경고 스타일 적용) -->
+                  <div>
+                    <h3>삭제 후</h3>
+                    <p class="tag-count">전체 메타 태그 {{ result.after_count }}개</p>
+                    {% if result.after_sensitive %}
+                      <ul class="tag-list warn-list">
+                        {% for item in result.after_sensitive %}
+                          <li><span>{{ item.key }}</span><strong>{{ item.value }}</strong></li>
+                        {% endfor %}
+                      </ul>
+                    {% else %}
+                      <p class="clean-state">민감 태그 없음</p>
+                    {% endif %}
+                  </div>
+                </div>
+
+                <!-- ExifTool/FFmpeg 처리 경고 메시지 (접이식) -->
+                {% if result.warnings %}
+                  <details class="warnings">
+                    <summary>경고 보기</summary>
+                    {% for warning in result.warnings %}
+                      <p>{{ warning }}</p>
+                    {% endfor %}
+                  </details>
+                {% endif %}
+              {% endif %}
+            </article>
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
+
+    <!-- ============================== -->
+    <!-- 푸터 -->
+    <!-- ============================== -->
+    <footer class="footer">
+      <span>Open-source basis: ExifTool, ExifCleaner-style batch metadata cleaning.</span>
+    </footer>
+
+    <!-- Google Maps API 키를 JavaScript 전역 설정으로 전달 -->
+    <script>
+      window.METAWASHER_CONFIG = {
+        googleMapsApiKey: {{ google_maps_api_key|tojson }}
+      };
+    </script>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>
